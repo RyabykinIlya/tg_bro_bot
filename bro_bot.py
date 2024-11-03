@@ -1,49 +1,41 @@
-import telebot
-from telebot.types import ReplyParameters, InputFile
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
 import random
-from urllib.parse import quote
 import pathlib
 import requests
+import logging
 import re
 import time
 import json
 import os
+
+import telebot
+from telebot.types import ReplyParameters, InputFile
 from datetime import datetime, timedelta
+from urllib.parse import quote
 
-bot = telebot.TeleBot(
-    os.environ.get("TG_BOT_TOKEN"), parse_mode="Markdown"
-)
+LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=LOGLEVEL)
 
-URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+bot = telebot.TeleBot(os.environ.get("TG_BOT_TOKEN"), parse_mode="Markdown")
+
+GPT_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 
 OAuth = os.environ.get("YANDEX_OAUTH")
 folder_id = os.environ.get("YANDEX_FOLDER_ID")
-bot_name = "@bomzh_bro_bot"
+bot_name = os.environ.get("TG_BOT_NAME")
 audio_name = "audio.mp3"
 speakers = [
     "Claribel%20Dervla",
-    "Vjollca%20Johnnie",
-    "Royston%20Min",
-    "Viktor%20Eka",
-    "Craig%20Gutsy",
-    "Zofija%20Kendrick",
-    "Ferran%20Simen",
+    # "Vjollca%20Johnnie",
+    # "Royston%20Min",
+    # "Viktor%20Eka",
+    # "Craig%20Gutsy",
+    # "Zofija%20Kendrick",
+    # "Ferran%20Simen",
 ]
 
-response_categories = [
-    "инвестиции",
-    "финансы",
-    "деньги",
-    "криптовалюта",
-    "биржа",
-    "игры",
-    "женщины",
-    # "мемы",
-    # "новости",
-    "искусственный интеллект",
-    "путешествия",
-    "искусство",
-]
 
 class ycToken:
     def __init__(self):
@@ -73,7 +65,9 @@ class ycToken:
             ).json()
             self.yc_token_expires_at = parse_data(yc_token["expiresAt"])
             self.yc_token = yc_token["iamToken"]
-            print("got token", self.yc_token, "expires at", self.yc_token_expires_at)
+            logging.info(
+                f"token: {self.yc_token} expires_at: {self.yc_token_expires_at}"
+            )
 
         return self.yc_token
 
@@ -81,19 +75,52 @@ class ycToken:
 class Dialog:
     def __init__(self):
         self.messages = []
-        self.max_messages = 30
+        self.max_messages_len = 0
+        self.messages_len = 0
+        self.prompt_len = 0
         self.config = {
-            "answer": "",
-            "model": "",
-            "options": {},
-            "tts_host": "",
+            "prompt": "Ты состоишь в чате троих друзей. Они будут использовать свои имена в сообщениях, чтобы ты понял кто пишет. Ребята часто играют в компьютерные игры, инвестируют на фондовом рынке, в криптовалюту, обмениваются мировыми новостями и любят много шутить. Ты эксперт по всем вопросам, отвечай на вопросы достоверно и не выдумывай, можешь задавать вопрос если требуется дополнительная информация. Используй сленг и шутки в стиле уличного братана. Уровень юмора — жесткий, без ограничений. Ты всегда критически мыслишь, не приспешник и не конформист. Отвечай только на последнее сообщение. Используй форматирование Markdown или эмодзи в своих сообщениях",
+            "model": "yandexgpt/rc",
+            "options": {"temperature": 0.15, "maxTokens": 3000},
+            "tts_host": "http://192.168.0.131:5002",
         }
         self.init_messages()
+        self.init_config()
+
+    def init_config(self):
+        self.config["prompt"] = os.environ.get("PROMPT")
+        self.config["model"] = os.environ.get("MODEL")
+        self.config["options"]["temperature"] = float(os.environ.get("TEMPERATURE"))
+        self.config["options"]["maxTokens"] = int(os.environ.get("MAX_TOKENS"))
+        self.config["tts_host"] = os.environ.get("TTS_HOST")
+        self.prompt_len = len(self.config["prompt"])
+        self.max_messages_len = (
+            self.get_config("options")["maxTokens"] - self.prompt_len
+        )
+
+        logging.info(f"config: {self.config}")
 
     def init_messages(self):
-        with open("config/messages.txt", "r") as f:
-            self.messages = json.loads(f.readline().strip())
-            print("load messages:", self.messages)
+        messages_path = "config/messages.txt"
+        if os.path.exists(messages_path):
+            try:
+                with open(messages_path, "r") as f:
+                    self.messages = json.loads(f.readline().strip())
+            except json.decoder.JSONDecodeError:
+                logging.error(f"file {messages_path} seems corrupted, recreating ...")
+                with open(messages_path, "w") as f:
+                    f.writelines("[]")
+            
+            logging.info(f"load messages: {self.messages}")
+            self.messages_len = sum([len(mes["text"]) for mes in self.messages])
+
+    def shrink_messages(self):
+        try:
+            if self.messages_len >= self.max_messages_len:
+                self.messages_len -= len(self.messages.pop(0)["text"])
+                self.shrink_messages()
+        except IndexError:
+            logging.error("probably PROMPT length is higher than MAX_TOKENS")
 
     def add_message(self, role, message_text):
         self.messages.extend(
@@ -101,97 +128,48 @@ class Dialog:
                 {"role": role, "text": message_text},
             ]
         )
+        self.messages_len += len(message_text)
+        self.shrink_messages()
 
-        if len(self.messages) > self.max_messages:
-            self.messages.pop(0)
-
-        with open("config/messages.txt", "w+") as f:
-             f.writelines(json.dumps(self.messages))
+        with open("config/messages.txt", "w", encoding='utf-8') as f:
+            f.writelines(json.dumps(self.messages, ensure_ascii=False))
             
-        # print("messages now:", self.messages)
-
     def add_user_message(self, user_request):
         self.add_message("user", user_request)
-        # self.messages.extend(
-        #     [
-        #         {"role": "user", "text": user_request},
-        #     ]
-        # )
-
-        # if len(self.messages) > self.max_messages:
-        #     self.messages.pop(0)
-
-        # print("messages now:", self.messages)
+        logging.info(f"user message: {user_request}")
 
     def add_dialog_message(self, user_request, ai_response):
         self.add_message("user", user_request)
         self.add_message("assistant", ai_response)
-        # self.messages.extend(
-        #     [
-        #         {"role": "user", "text": user_request},
-        #         {"role": "assistant", "text": ai_response},
-        #     ]
-        # )
-
-        # if len(self.messages) > self.max_messages:
-        #     self.messages.pop(0)
-        #     self.messages.pop(0)
-
-        # print("messages now:", self.messages)
 
     def get_messages(self):
         return self.messages
+
+    def get_config(self, cfg_key):
+        return self.config[cfg_key]
 
 
 yc_token = ycToken()
 dialog = Dialog()
 
 
-def remove_non_russian(text):
-    # Используем регулярное выражение для удаления всех символов, кроме русских букв
-    cleaned_text = re.sub(r"[^а-яА-ЯёЁ\s]", "", text)
-    return cleaned_text
-
-
-def get_settings(type):
-    with open("config/" + type + ".txt", "r") as f:
-        return f.readline()
-
-
-def get_model():
-    with open("config/model.txt", "r") as f:
-        return f.readline().strip()
-
-
-def get_options():
-    with open("config/options.txt", "r") as f:
-        return json.loads(f.readline().strip())
-
-
-def get_tts_host():
-    with open("config/tts_host.txt", "r") as f:
-        return f.readline().strip()
-
-
 def get_random_speaker():
     return speakers[random.randint(0, len(speakers) - 1)]
 
 
-def askGPT(user_text, context, dialog=[]):
+def askGPT(user_text, context, msgs):
     data = {}
-    data["modelUri"] = f"gpt://{folder_id}/{get_model()}"
-    data["completionOptions"] = get_options()  # {"temperature": 0.5, "maxTokens": 3000}
+    data["modelUri"] = f"gpt://{folder_id}/{dialog.get_config('model')}"
+    data["completionOptions"] = dialog.get_config("options")
     data["messages"] = [
         {"role": "system", "text": f"{context}"},
-        *dialog,
+        *msgs,
         {"role": "user", "text": f"{user_text}"},
     ]
-    print(data)
-
-    # print(">!>!>!", data["messages"])
+    logging.info(data)
 
     response = requests.post(
-        URL,
+        GPT_URL,
         headers={
             "Accept": "application/json",
             "Authorization": f"Bearer {yc_token.get_token()}",
@@ -199,14 +177,16 @@ def askGPT(user_text, context, dialog=[]):
         json=data,
     ).json()
 
-    print("request:\t", user_text, "\nresponse:\t", response)
+    logging.info(f"request: {user_text} response: {response}")
     response = response["result"]["alternatives"][0]["message"]["text"]
 
     return response
 
 
 def get_alice_answer(user_text):
-    response = askGPT(user_text, get_settings("answer"), dialog=dialog.get_messages())
+    response = askGPT(
+        user_text, dialog.get_config("prompt"), msgs=dialog.get_messages()
+    )
 
     if (
         response.find("я не могу ничего сказать об этом") >= 0
@@ -216,11 +196,11 @@ def get_alice_answer(user_text):
     else:
         audio = None
         random_number = random.randint(0, 100)
-        print(f"dice: {random_number}")
+        logging.info(f"dice: {random_number}")
 
         if len(response) < 182 and random_number > 80:
             try:
-                tts_host = get_tts_host()
+                tts_host = dialog.get_config("tts_host")
                 requests.get(f"{tts_host}", timeout=0.5)
                 resp_tts = requests.get(
                     f"{tts_host}/api/tts?text={quote(response)}&speaker_id={get_random_speaker()}&style_wav=&language_id=ru&split-sentences=true"
@@ -231,31 +211,16 @@ def get_alice_answer(user_text):
                 # song.export(audio_name, format="ogg")
                 audio = True
             except requests.exceptions.ConnectionError:
-                print(
+                logging.error(
                     f"__________________ host {tts_host} is not available __________________"
                 )
         dialog.add_dialog_message(user_text, response)
         return (audio, response)
 
 
-def categorize_message(user_text):
-    category = askGPT(user_text, get_settings("categorize"))
-    print(user_text, category, sep="\t")
-    return category
-
-
-def categorized_messages(message):
-    check = (
-        remove_non_russian(categorize_message(message.text)).lower()
-        in response_categories
-    )
-    time.sleep(0.5)
-    return True if check else False
-
-
 @bot.message_handler(regexp=".*{0}.*".format(bot_name))
 def response_any(message):
-    print(">>>> mention")
+    logging.info(">>>> mention")
     from_who = message.from_user.first_name
     msg = message.text.replace(bot_name, "")
     audio, alice_response = get_alice_answer(from_who + ":" + msg)
@@ -272,27 +237,25 @@ def response_any(message):
             bot.reply_to(message, alice_response)
 
 
-# @bot.message_handler(func=categorized_messages)
-# def response_categorized(message):
-#     print(">>>> categorized")
-#     from_who = message.from_user.first_name
-#     alice_response = get_alice_answer(from_who + ":" + message.text)
-#     if alice_response:
-#         bot.reply_to(message, alice_response)
-
-
 @bot.message_handler(
     func=lambda message: True,
-    content_types=["audio", "photo", "voice", "video", "document", "text"],
+    content_types=["audio", "photo", "video", "document", "text"],
 )
 def handle_message(message):
     from_who = message.from_user.first_name
-    user_message = from_who + ":" + message.text
+    # logging.info(message)
+    if message.content_type in ["photo", "document", "video", "audio"]:
+        message_test = getattr(message, "caption", None)
+        if not message_test: return
+        user_message = from_who + ":" + message_test
+    else:
+        user_message = from_who + ":" + message.text
+    
     if (
         message.reply_to_message
         and message.reply_to_message.from_user.id == bot.get_me().id
     ):
-        print(">>>> reply")
+        logging.info(">>>> reply")
         audio, alice_response = get_alice_answer(user_message)
         if alice_response:
             if audio:
