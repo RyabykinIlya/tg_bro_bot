@@ -192,7 +192,7 @@ def get_alice_answer(user_text):
         response.find("я не могу ничего сказать об этом") >= 0
         or response.find("есть много сайтов с информацией на эту тему") >= 0
     ):
-        return (None, None)
+        return (None, "Я не хочу об этом говорить, братан")
     else:
         audio = None
         random_number = random.randint(0, 100)
