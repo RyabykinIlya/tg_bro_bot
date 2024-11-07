@@ -14,7 +14,6 @@ import telebot
 from telebot.types import ReplyParameters, InputFile
 from datetime import datetime, timedelta
 from urllib.parse import quote
-from requests import JSONDecodeError
 
 LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=LOGLEVEL)
