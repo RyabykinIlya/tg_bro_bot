@@ -222,8 +222,15 @@ def get_alice_answer(user_text):
 
 def request_article_summary(url):
     article_ml_host = dialog.get_config("article_ml_host")
-    requests.get(f"{article_ml_host}", timeout=0.5)
-    response = requests.get(f"{article_ml_host}/summarize/article_from_url?url={url}")
+    try:
+        requests.get(f"{article_ml_host}", timeout=0.5)
+        response = requests.get(f"{article_ml_host}/summarize/article_from_url?url={url}")
+    except requests.exceptions.ConnectionError:
+        logging.error(
+            f"__________________ host {article_ml_host} is not available __________________"
+        )
+        raise ConnectionError
+    
     if response.status_code == 200:
         return response.text
     else: 
@@ -262,7 +269,7 @@ def process_url(message):
                         message.from_user.first_name + ": " + summary
                     )
                     return True
-            except AttributeError:
+            except (AttributeError, ConnectionError):
                 break
 
 
