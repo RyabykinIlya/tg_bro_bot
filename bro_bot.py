@@ -14,6 +14,7 @@ import telebot
 from telebot.types import ReplyParameters, InputFile
 from datetime import datetime, timedelta
 from urllib.parse import quote
+from requests import JSONDecodeError
 
 LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=LOGLEVEL)
@@ -83,6 +84,7 @@ class Dialog:
             "model": "yandexgpt/rc",
             "options": {"temperature": 0.15, "maxTokens": 3000},
             "tts_host": "http://192.168.0.131:5002",
+            "article_ml_host": "http://192.168.0.131:3003",
         }
         self.init_messages()
         self.init_config()
@@ -93,6 +95,7 @@ class Dialog:
         self.config["options"]["temperature"] = float(os.environ.get("TEMPERATURE"))
         self.config["options"]["maxTokens"] = int(os.environ.get("MAX_TOKENS"))
         self.config["tts_host"] = os.environ.get("TTS_HOST")
+        self.config["article_ml_host"] = os.environ.get("ARTICLE_ML_HOST")
         self.prompt_len = len(self.config["prompt"])
         self.max_messages_len = (
             self.get_config("options")["maxTokens"] - self.prompt_len
@@ -110,7 +113,7 @@ class Dialog:
                 logging.error(f"file {messages_path} seems corrupted, recreating ...")
                 with open(messages_path, "w") as f:
                     f.writelines("[]")
-            
+
             logging.info(f"load messages: {self.messages}")
             self.messages_len = sum([len(mes["text"]) for mes in self.messages])
 
@@ -131,9 +134,9 @@ class Dialog:
         self.messages_len += len(message_text)
         self.shrink_messages()
 
-        with open("config/messages.txt", "w", encoding='utf-8') as f:
+        with open("config/messages.txt", "w", encoding="utf-8") as f:
             f.writelines(json.dumps(self.messages, ensure_ascii=False))
-            
+
     def add_user_message(self, user_request):
         self.add_message("user", user_request)
         logging.info(f"user message: {user_request}")
@@ -218,23 +221,73 @@ def get_alice_answer(user_text):
         return (audio, response)
 
 
-@bot.message_handler(regexp=".*{0}.*".format(bot_name))
-def response_any(message):
-    logging.info(">>>> mention")
+def request_article_summary(url):
+    article_ml_host = dialog.get_config("article_ml_host")
+    requests.get(f"{article_ml_host}", timeout=0.5)
+    response = requests.get(f"{article_ml_host}/summarize/article_from_url?url={url}")
+    if response.status_code == 200:
+        return response.text
+    else: 
+        raise AttributeError
+
+
+def get_user_message(message):
     from_who = message.from_user.first_name
-    msg = message.text.replace(bot_name, "")
-    audio, alice_response = get_alice_answer(from_who + ":" + msg)
+    if message.content_type in ["photo", "document", "video", "audio"]:
+        message_test = getattr(message, "caption", None)
+        if not message_test:
+            return
+        user_message = from_who + ":" + message_test
+    else:
+        user_message = from_who + ":" + message.text
+
+    return user_message.replace(bot_name, "")
+
+
+def process_url(message):
+    if message.entities:
+        for entity in message.entities:
+            try:
+                if entity.type == "url":
+                    url = message.text[entity.offset : entity.offset + entity.length]
+                    summary = request_article_summary(url)
+                    bot.reply_to(message, summary)
+                    dialog.add_user_message(
+                        message.from_user.first_name + ": " + summary
+                    )
+                    return True
+                elif entity.type == "text_link":
+                    summary = request_article_summary(entity.url)
+                    bot.reply_to(message, summary)
+                    dialog.add_user_message(
+                        message.from_user.first_name + ": " + summary
+                    )
+                    return True
+            except AttributeError:
+                break
+
+
+def response_to_user(message):
+    process_url(message)
+
+    user_message = get_user_message(message)
+    audio, alice_response = get_alice_answer(user_message)
+
     if alice_response:
         if audio:
             bot.send_voice(
                 message.chat.id,
                 voice=InputFile(pathlib.Path(audio_name)),
-                # caption="послушай, братан",
-                # duration=audio.duration_seconds,
                 reply_parameters=ReplyParameters(message.id, message.chat.id),
             )
         else:
             bot.reply_to(message, alice_response)
+
+
+@bot.message_handler(regexp=".*{0}.*".format(bot_name))
+def response_any(message):
+    logging.info(">>>> mention")
+    response_to_user(message)
 
 
 @bot.message_handler(
@@ -242,34 +295,15 @@ def response_any(message):
     content_types=["audio", "photo", "video", "document", "text"],
 )
 def handle_message(message):
-    from_who = message.from_user.first_name
-    # logging.info(message)
-    if message.content_type in ["photo", "document", "video", "audio"]:
-        message_test = getattr(message, "caption", None)
-        if not message_test: return
-        user_message = from_who + ":" + message_test
-    else:
-        user_message = from_who + ":" + message.text
-    
     if (
         message.reply_to_message
         and message.reply_to_message.from_user.id == bot.get_me().id
     ):
         logging.info(">>>> reply")
-        audio, alice_response = get_alice_answer(user_message)
-        if alice_response:
-            if audio:
-                bot.send_voice(
-                    message.chat.id,
-                    voice=InputFile(pathlib.Path(audio_name)),
-                    # caption="послушай, братан",
-                    # duration=audio.duration_seconds,
-                    reply_parameters=ReplyParameters(message.id, message.chat.id),
-                )
-            else:
-                bot.reply_to(message, alice_response)
+        response_to_user(message)
     else:
-        dialog.add_user_message(user_message)
+        if not process_url(message):
+            dialog.add_user_message(get_user_message(message))
 
 
 bot.infinity_polling()
