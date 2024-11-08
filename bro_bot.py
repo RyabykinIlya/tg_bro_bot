@@ -192,6 +192,7 @@ def get_alice_answer(user_text):
         response.find("я не могу ничего сказать об этом") >= 0
         or response.find("есть много сайтов с информацией на эту тему") >= 0
     ):
+        logging.info("can not speak")
         return (None, "Я не хочу об этом говорить, братан")
     else:
         audio = None
