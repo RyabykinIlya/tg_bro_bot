@@ -72,6 +72,16 @@ class ycToken:
         return self.yc_token
 
 
+def try_connect(host):
+    try:
+        requests.get(f"{host}", timeout=0.5)
+        logging.info(f"> {host} connected")
+        return True
+    except requests.exceptions.ConnectionError:
+        logging.error(f"______________ {host} is not available ______________")
+        return False
+
+
 class Dialog:
     def __init__(self):
         self.messages = []
@@ -100,6 +110,8 @@ class Dialog:
             self.get_config("options")["maxTokens"] - self.prompt_len
         )
 
+        try_connect(self.config["tts_host"])
+        try_connect(self.config["article_ml_host"])
         logging.info(f"config: {self.config}")
 
     def init_messages(self):
@@ -202,39 +214,28 @@ def get_alice_answer(user_text):
         logging.info(f"dice: {random_number}")
 
         if len(response) < 182 and random_number > 80:
-            try:
-                tts_host = dialog.get_config("tts_host")
-                requests.get(f"{tts_host}", timeout=0.5)
+            tts_host = dialog.get_config("tts_host")
+            if try_connect(tts_host):
                 resp_tts = requests.get(
                     f"{tts_host}/api/tts?text={quote(response)}&speaker_id={get_random_speaker()}&style_wav=&language_id=ru&split-sentences=true"
                 )
                 with open(audio_name, "wb") as f:
                     f.write(resp_tts.content)
-                # song = AudioSegment.from_wav("audio.wav")
-                # song.export(audio_name, format="ogg")
                 audio = True
-            except requests.exceptions.ConnectionError:
-                logging.error(
-                    f"__________________ host {tts_host} is not available __________________"
-                )
         dialog.add_dialog_message(user_text, response)
         return (audio, response)
 
 
 def request_article_summary(url):
     article_ml_host = dialog.get_config("article_ml_host")
-    try:
-        requests.get(f"{article_ml_host}", timeout=0.5)
-        response = requests.get(f"{article_ml_host}/summarize/article_from_url?url={url}")
-    except requests.exceptions.ConnectionError:
-        logging.error(
-            f"__________________ host {article_ml_host} is not available __________________"
+    if try_connect(article_ml_host):
+        response = requests.get(
+            f"{article_ml_host}/summarize/article_from_url?url={url}"
         )
-        raise ConnectionError
-    
+
     if response.status_code == 200:
         return response.text
-    else: 
+    else:
         raise AttributeError
 
 
@@ -243,7 +244,7 @@ def get_user_message(message):
     if message.content_type in ["photo", "document", "video", "audio"]:
         message_test = getattr(message, "caption", None)
         if not message_test:
-            return
+            return None
         user_message = from_who + ":" + message_test
     else:
         user_message = from_who + ":" + message.text
@@ -278,6 +279,9 @@ def response_to_user(message):
     process_url(message)
 
     user_message = get_user_message(message)
+    if not user_message:
+        return
+
     audio, alice_response = get_alice_answer(user_message)
 
     if alice_response:
