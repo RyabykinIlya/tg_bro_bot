@@ -241,6 +241,7 @@ def request_article_summary(url):
 
 def get_user_message(message):
     from_who = message.from_user.first_name
+    logging.debug(f"> content_type: {message.content_type}")
     if message.content_type in ["photo", "document", "video", "audio"]:
         message_test = getattr(message, "caption", None)
         if not message_test:
@@ -253,26 +254,29 @@ def get_user_message(message):
 
 
 def process_url(message):
-    if message.entities:
-        for entity in message.entities:
-            try:
-                if entity.type == "url":
-                    url = message.text[entity.offset : entity.offset + entity.length]
-                    summary = request_article_summary(url)
-                    bot.reply_to(message, summary)
-                    dialog.add_user_message(
-                        message.from_user.first_name + ": " + summary
-                    )
-                    return True
-                elif entity.type == "text_link":
-                    summary = request_article_summary(entity.url)
-                    bot.reply_to(message, summary)
-                    dialog.add_user_message(
-                        message.from_user.first_name + ": " + summary
-                    )
-                    return True
-            except (AttributeError, ConnectionError):
-                break
+    for entity_type in ["caption_entities", "entities"]:
+        entities = getattr(message, entity_type)
+        if entities:
+            for entity in entities:
+                try:
+                    if entity.type == "url":
+                        url = message.text[entity.offset : entity.offset + entity.length]
+                        summary = request_article_summary(url)
+                        bot.reply_to(message, summary)
+                        dialog.add_user_message(
+                            message.from_user.first_name + ": " + summary
+                        )
+                        return True
+                    elif entity.type == "text_link":
+                        summary = request_article_summary(entity.url)
+                        bot.reply_to(message, summary)
+                        dialog.add_user_message(
+                            message.from_user.first_name + ": " + summary
+                        )
+                        return True
+                except (AttributeError, ConnectionError) as err:
+                    logging.error(err)
+                    continue
 
 
 def response_to_user(message):
@@ -314,7 +318,9 @@ def handle_message(message):
         response_to_user(message)
     else:
         if not process_url(message):
-            dialog.add_user_message(get_user_message(message))
+            user_message = get_user_message(message)
+            if user_message:
+                dialog.add_user_message(user_message)
 
 
 bot.infinity_polling()
