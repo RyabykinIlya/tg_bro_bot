@@ -9,6 +9,7 @@ import re
 import time
 import json
 import os
+import string
 
 import telebot
 from telebot.types import ReplyParameters, InputFile
@@ -18,6 +19,9 @@ from urllib.parse import quote
 LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=LOGLEVEL)
 
+TARGET_CHAT_ID = os.environ.get("TARGET_CHAT_ID", "")
+if TARGET_CHAT_ID:
+    TARGET_CHAT_ID = int(TARGET_CHAT_ID)
 bot = telebot.TeleBot(os.environ.get("TG_BOT_TOKEN"), parse_mode="Markdown")
 
 GPT_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
@@ -26,13 +30,15 @@ OAuth = os.environ.get("YANDEX_OAUTH")
 folder_id = os.environ.get("YANDEX_FOLDER_ID")
 bot_name = os.environ.get("TG_BOT_NAME")
 audio_name = "audio.mp3"
+re_insta = "https://www.instagram.com/reel/[-a-zA-Z0-9()@:%_\+.~#?&//=]*"
+punctuation = "\"'#$%&*+^_`{|}~@"
 speakers = [
-    "Claribel%20Dervla",
+    # "Claribel%20Dervla",
     # "Vjollca%20Johnnie",
     # "Royston%20Min",
     # "Viktor%20Eka",
     # "Craig%20Gutsy",
-    # "Zofija%20Kendrick",
+    "Zofija%20Kendrick",
     # "Ferran%20Simen",
 ]
 
@@ -94,6 +100,7 @@ class Dialog:
             "options": {"temperature": 0.15, "maxTokens": 3000},
             "tts_host": "http://192.168.0.131:5002",
             "article_ml_host": "http://192.168.0.131:3003",
+            "speaker_wav": "",
         }
         self.init_messages()
         self.init_config()
@@ -105,6 +112,7 @@ class Dialog:
         self.config["options"]["maxTokens"] = int(os.environ.get("MAX_TOKENS"))
         self.config["tts_host"] = os.environ.get("TTS_HOST")
         self.config["article_ml_host"] = os.environ.get("ARTICLE_ML_HOST")
+        self.config["speaker_wav"] = os.environ.get("SPEAKER_WAV")
         self.prompt_len = len(self.config["prompt"])
         self.max_messages_len = (
             self.get_config("options")["maxTokens"] - self.prompt_len
@@ -116,17 +124,16 @@ class Dialog:
 
     def init_messages(self):
         messages_path = "config/messages.txt"
-        if os.path.exists(messages_path):
-            try:
-                with open(messages_path, "r") as f:
-                    self.messages = json.loads(f.readline().strip())
-            except json.decoder.JSONDecodeError:
-                logging.error(f"file {messages_path} seems corrupted, recreating ...")
-                with open(messages_path, "w") as f:
-                    f.writelines("[]")
+        try:
+            with open(messages_path, "r") as f:
+                self.messages = json.loads(f.readline().strip())
+        except json.decoder.JSONDecodeError:
+            logging.error(f"file {messages_path} seems corrupted, recreating ...")
+            with open(messages_path, "w") as f:
+                f.writelines("[]")
 
-            logging.info(f"load messages: {self.messages}")
-            self.messages_len = sum([len(mes["text"]) for mes in self.messages])
+        logging.info(f"load messages: {self.messages}")
+        self.messages_len = sum([len(mes["text"]) for mes in self.messages])
 
     def shrink_messages(self):
         try:
@@ -216,9 +223,18 @@ def get_alice_answer(user_text):
         if len(response) < 182 and random_number > 80:
             tts_host = dialog.get_config("tts_host")
             if try_connect(tts_host):
-                resp_tts = requests.get(
-                    f"{tts_host}/api/tts?text={quote(response)}&speaker_id={get_random_speaker()}&style_wav=&language_id=ru&split-sentences=true"
+                text_wo_punctuation = " ".join(
+                    word.strip(punctuation) for word in response.split()
                 )
+                speaker_wav = dialog.get_config("speaker_wav")
+                if speaker_wav:
+                    resp_tts = requests.get(
+                        f"{tts_host}/api/tts?text={quote(text_wo_punctuation)}&speaker_wav={speaker_wav}&language_id=ru&split-sentences=true"
+                    )
+                else:
+                    resp_tts = requests.get(
+                        f"{tts_host}/api/tts?text={quote(text_wo_punctuation)}&speaker_id={get_random_speaker()}&style_wav=&language_id=ru&split-sentences=true"
+                    )
                 with open(audio_name, "wb") as f:
                     f.write(resp_tts.content)
                 audio = True
@@ -233,8 +249,8 @@ def request_article_summary(url):
             f"{article_ml_host}/summarize/article_from_url?url={url}"
         )
 
-    if response.status_code == 200:
-        return response.text
+        if response.status_code == 200:
+            return response.text
     else:
         raise AttributeError
 
@@ -253,26 +269,41 @@ def get_user_message(message):
     return user_message.replace(bot_name, "")
 
 
+def process_insta(msg_text):
+    return re.search(re_insta, msg_text).group(0).replace("www.", "dd")
+
+
 def process_url(message):
+    msg_text = message.text
     for entity_type in ["caption_entities", "entities"]:
         entities = getattr(message, entity_type)
         if entities:
             for entity in entities:
                 try:
                     if entity.type == "url":
-                        url = message.text[entity.offset : entity.offset + entity.length]
-                        summary = request_article_summary(url)
-                        bot.reply_to(message, summary)
-                        dialog.add_user_message(
-                            message.from_user.first_name + ": " + summary
-                        )
+                        if "www.instagram.com" in msg_text:
+                            bot.reply_to(message, process_insta(msg_text))
+                        else:
+                            url = msg_text[
+                                entity.offset : entity.offset + entity.length
+                            ]
+                            summary = request_article_summary(url)
+                            bot.reply_to(message, summary)
+                            dialog.add_user_message(
+                                message.from_user.first_name + ": " + summary
+                            )
+
                         return True
                     elif entity.type == "text_link":
-                        summary = request_article_summary(entity.url)
-                        bot.reply_to(message, summary)
-                        dialog.add_user_message(
-                            message.from_user.first_name + ": " + summary
-                        )
+                        if "www.instagram.com" in msg_text:
+                            bot.reply_to(message, process_insta(msg_text))
+                        else:
+                            summary = request_article_summary(entity.url)
+                            bot.reply_to(message, summary)
+                            dialog.add_user_message(
+                                message.from_user.first_name + ": " + summary
+                            )
+
                         return True
                 except (AttributeError, ConnectionError) as err:
                     logging.error(err)
@@ -302,6 +333,7 @@ def response_to_user(message):
 @bot.message_handler(regexp=".*{0}.*".format(bot_name))
 def response_any(message):
     logging.info(">>>> mention")
+    logging.debug(f"chat id: {message.chat.id}, {TARGET_CHAT_ID}")
     response_to_user(message)
 
 
@@ -310,17 +342,22 @@ def response_any(message):
     content_types=["audio", "photo", "video", "document", "text"],
 )
 def handle_message(message):
-    if (
-        message.reply_to_message
-        and message.reply_to_message.from_user.id == bot.get_me().id
-    ):
-        logging.info(">>>> reply")
-        response_to_user(message)
+    logging.debug(f"chat id: {message.chat.id}, {TARGET_CHAT_ID}")
+    if TARGET_CHAT_ID == "" or message.chat.id == TARGET_CHAT_ID:
+        if (
+            message.reply_to_message
+            and message.reply_to_message.from_user.id == bot.get_me().id
+        ):
+            logging.info(">>>> reply")
+            response_to_user(message)
+        else:
+            if not process_url(message):
+                user_message = get_user_message(message)
+                if user_message:
+                    dialog.add_user_message(user_message)
     else:
-        if not process_url(message):
-            user_message = get_user_message(message)
-            if user_message:
-                dialog.add_user_message(user_message)
+        logging.info(f"PRIVATE MSG: {message.text}")
+        bot.reply_to(message, "Извини, но я не отвечаю в личку")
 
 
 bot.infinity_polling()
